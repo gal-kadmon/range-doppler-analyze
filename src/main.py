@@ -1,6 +1,6 @@
 from data_generator import generate_synthetic_rd_data
 from compare_matrices import compare_target_matrices
-import pandas as pd
+from visualize_comparison import plot_targets
 
 def main():
     # --------------------------
@@ -29,6 +29,15 @@ def main():
     for table in pdu.tables:
         print(f"=== Table: {table.name} ===")
         print(table.data.to_string(index=False))
+
+    # --------------------------
+    # Visualize comparison results
+    # --------------------------
+    matrix1_only = next(t.data for t in pdu.tables if t.name == 'matrix1_only')
+    matrix2_only = next(t.data for t in pdu.tables if t.name == 'matrix2_only')
+    overlap = next(t.data for t in pdu.tables if t.name == 'overlap')
+    shape = pdu.tensors[0].data.shape
+    plot_targets(matrix1_only, matrix2_only, overlap, shape)
 
 if __name__ == "__main__":
     main()
