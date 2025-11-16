@@ -1,122 +1,202 @@
 # visualize_comparison.py
 # -----------------------------------------------------------------------------
-# Visualize comparison of Range-Doppler targets:
-# - Red:  Matrix1-only
-# - Blue: Matrix2-only
-# - Purple: Full overlap or partial overlap cells
-# Dynamic scaling (zoom-in) to non-empty areas only.
+# Visualization module for Range–Doppler target comparison.
+#
+# This tool visualizes the comparison result stored in three tables:
+#   • matrix1_only:  target_id, coords, size
+#   • matrix2_only:  target_id, coords, size
+#   • overlap:       target_id_matrix1, target_id_matrix2,
+#                    coords_matrix1, coords_matrix2,
+#                    overlap_cells, overlap_percent
+#
+# Each coordinate is expressed as (range_index, doppler_index).
+#
+# The visualization:
+#   • Draws all target pixels with color coding:
+#         red     → pixel from matrix1-only target
+#         blue    → pixel from matrix2-only target
+#         purple  → pixel that belongs to overlapping targets
+#
+#   • Compresses/zooms the grid to show only coordinate rows/columns
+#     that contain targets, but labels axes with ORIGINAL RD indices.
+#
+# This yields a compact visualization that preserves the physical
+# meaning of indices while focusing only on target regions.
 # -----------------------------------------------------------------------------
 
+from typing import Tuple
+
+import numpy as np
+import pandas as pd
 import matplotlib.pyplot as plt
 from matplotlib.patches import Rectangle
 from matplotlib.collections import PatchCollection
-import numpy as np
-import pandas as pd
 
 
-def plot_targets(df_m1_only: pd.DataFrame,
-                 df_m2_only: pd.DataFrame,
-                 df_overlap: pd.DataFrame,
-                 matrix_shape: tuple[int, int]):
+def plot_targets(
+    df_m1_only: pd.DataFrame,
+    df_m2_only: pd.DataFrame,
+    df_overlap: pd.DataFrame,
+    matrix_shape: Tuple[int, int],
+) -> None:
     """
-    Display targets comparison on a dynamic grid.
-    - Red   → Matrix1-only
-    - Blue  → Matrix2-only
-    - Purple → Overlap (full or partial)
+    Visualize comparison results between two Range–Doppler matrices.
+
+    Parameters
+    ----------
+    df_m1_only : DataFrame
+        Contains columns ["target_id", "coords", "size"],
+        where coords is a list of (r,c) index pairs.
+
+    df_m2_only : DataFrame
+        Same format as df_m1_only.
+
+    df_overlap : DataFrame
+        Contains columns:
+            "target_id_matrix1",
+            "target_id_matrix2",
+            "coords_matrix1",
+            "coords_matrix2",
+            "overlap_cells",
+            "overlap_percent"
+
+    matrix_shape : tuple(int,int)
+        Shape of the original matrices (range, doppler).
+        Used only as reference for axis labeling.
     """
-    # ----------------------------- Helper Functions ----------------------------- #
-    def extract_all_coords(df: pd.DataFrame, coord_field="coords"):
-        """Extract list of (r, c) from a dataframe field."""
-        if df.empty:
-            return []
-        if coord_field in df.columns:
-            coords = [tuple(x) for row in df[coord_field] for x in row]
-        elif {"dp_indices", "rg_indices"} <= set(df.columns):
-            coords = []
-            for _, row in df.iterrows():
-                dp = row["dp_indices"]
-                rg = row["rg_indices"]
-                if isinstance(dp, list) and all(isinstance(x, int) for x in dp):
-                    coords.extend(zip(dp, rg))
-                else:
-                    for dp_sub, rg_sub in zip(dp, rg):
-                        coords.extend(zip(dp_sub, rg_sub))
-        else:
-            coords = []
-        return list(set(coords))
 
-    def build_rectangles(coords, color):
-        """Return a list of matplotlib Rectangles from coordinates."""
-        return [Rectangle((col_scale[c], row_scale[r]), 1, 1, facecolor=color, edgecolor='gray')
-                for r, c in coords if r in row_scale and c in col_scale]
+    # ----------------------------------------------------------------------
+    # Collect all coordinates from all tables
+    # ----------------------------------------------------------------------
+    all_coords = []
 
-    # -------------------------- Gather all coordinates -------------------------- #
-    coords_m1 = extract_all_coords(df_m1_only)
-    coords_m2 = extract_all_coords(df_m2_only)
-    coords_overlap = []
+    if not df_m1_only.empty:
+        for _, row in df_m1_only.iterrows():
+            all_coords.extend(row["coords"])
+
+    if not df_m2_only.empty:
+        for _, row in df_m2_only.iterrows():
+            all_coords.extend(row["coords"])
 
     if not df_overlap.empty:
-        if "overlap_coords" in df_overlap.columns:
-            for row in df_overlap["overlap_coords"]:
-                coords_overlap.extend(row)
-        else:
-            # Fallback to old format
-            for _, row in df_overlap.iterrows():
-                dp_lists = row["dp_indices"]
-                rg_lists = row["rg_indices"]
-                for dp_sub, rg_sub in zip(dp_lists, rg_lists):
-                    coords_overlap.extend(zip(dp_sub, rg_sub))
+        for _, row in df_overlap.iterrows():
+            all_coords.extend(row["coords_matrix1"])
+            all_coords.extend(row["coords_matrix2"])
 
-    all_coords = coords_m1 + coords_m2 + coords_overlap
     if not all_coords:
         print("No targets to visualize.")
         return
 
-    all_coords = np.array(all_coords)
-    unique_rows = np.unique(all_coords[:, 0])
-    unique_cols = np.unique(all_coords[:, 1])
+    all_coords_arr = np.array(all_coords, dtype=int)
+    unique_rows = np.unique(all_coords_arr[:, 0])
+    unique_cols = np.unique(all_coords_arr[:, 1])
 
-    # Dynamic scaling maps
-    row_scale = {val: i for i, val in enumerate(sorted(unique_rows))}
-    col_scale = {val: i for i, val in enumerate(sorted(unique_cols))}
+    # ----------------------------------------------------------------------
+    # Build compressed-to-original mapping for zoomed view
+    # ----------------------------------------------------------------------
+    row_map = {r: i for i, r in enumerate(sorted(unique_rows))}
+    col_map = {c: i for i, c in enumerate(sorted(unique_cols))}
 
-    # -------------------------- Build all patches -------------------------- #
-    patches = []
-    patches.extend(build_rectangles(coords_m1, 'red'))
-    patches.extend(build_rectangles(coords_m2, 'blue'))
-    patches.extend(build_rectangles(coords_overlap, 'purple'))
+    # ----------------------------------------------------------------------
+    # Utility to build colored pixel rectangles
+    # ----------------------------------------------------------------------
+    def build_rectangles(coords, color):
+        patches = []
+        for (r, c) in coords:
+            if r not in row_map or c not in col_map:
+                continue
+            rr = row_map[r]
+            cc = col_map[c]
+            patches.append(
+                Rectangle((cc, rr), 1, 1, facecolor=color, edgecolor="gray")
+            )
+        return patches
 
-    # -------------------------- Create the plot --------------------------- #
+    # ----------------------------------------------------------------------
+    # Collect patches for each category
+    # ----------------------------------------------------------------------
+    patches_m1_only = []
+    patches_m2_only = []
+    patches_overlap = []
+
+    # Matrix1-only: red
+    if not df_m1_only.empty:
+        for _, row in df_m1_only.iterrows():
+            patches_m1_only.extend(build_rectangles(row["coords"], "red"))
+
+    # Matrix2-only: blue
+    if not df_m2_only.empty:
+        for _, row in df_m2_only.iterrows():
+            patches_m2_only.extend(build_rectangles(row["coords"], "blue"))
+
+    # Overlapping targets: purple (full or partial)
+    if not df_overlap.empty:
+        for _, row in df_overlap.iterrows():
+
+            coords1 = set(row["coords_matrix1"])
+            coords2 = set(row["coords_matrix2"])
+            intersection = coords1 & coords2
+
+            full_overlap = (coords1 == coords2 == intersection)
+
+            if full_overlap:
+                patches_overlap.extend(build_rectangles(coords1, "purple"))
+
+            else:
+                # Partial overlap: separate regions
+                non1 = coords1 - intersection
+                non2 = coords2 - intersection
+
+                patches_m1_only.extend(build_rectangles(non1, "red"))
+                patches_m2_only.extend(build_rectangles(non2, "blue"))
+                patches_overlap.extend(build_rectangles(intersection, "purple"))
+
+    # ----------------------------------------------------------------------
+    # Create the figure
+    # ----------------------------------------------------------------------
     fig, ax = plt.subplots(figsize=(12, 8))
-    ax.set_aspect('equal')
-    ax.set_facecolor('white')
+    ax.set_aspect("equal")
+    ax.set_facecolor("white")
 
-    # Add all rectangles as a PatchCollection (faster)
-    collection = PatchCollection(patches, match_original=True)
-    ax.add_collection(collection)
+    # Add patch collections
+    if patches_m1_only:
+        ax.add_collection(PatchCollection(patches_m1_only, match_original=True))
+    if patches_m2_only:
+        ax.add_collection(PatchCollection(patches_m2_only, match_original=True))
+    if patches_overlap:
+        ax.add_collection(PatchCollection(patches_overlap, match_original=True))
 
-    # Configure gridlines and ticks
-    ax.set_xticks(range(len(unique_cols) + 1))
-    ax.set_yticks(range(len(unique_rows) + 1))
-    ax.grid(True, color='gray', linewidth=0.4, alpha=0.5)
+    # ----------------------------------------------------------------------
+    # Configure axes: compressed grid but with ORIGINAL index labels
+    # ----------------------------------------------------------------------
+    ax.set_xticks(range(len(unique_cols)))
+    ax.set_xticklabels(sorted(unique_cols), rotation=45)
+
+    ax.set_yticks(range(len(unique_rows)))
+    ax.set_yticklabels(sorted(unique_rows))
+
+    ax.grid(True, color="gray", linewidth=0.4, alpha=0.6)
     ax.invert_yaxis()
 
-    # Set plot limits to visible region only
     ax.set_xlim(0, len(unique_cols))
     ax.set_ylim(0, len(unique_rows))
 
-    # Add legend
-    handles = [
-        Rectangle((0, 0), 1, 1, color='red', label='Matrix1 Only'),
-        Rectangle((0, 0), 1, 1, color='blue', label='Matrix2 Only'),
-        Rectangle((0, 0), 1, 1, color='purple', label='Overlap'),
+    # ----------------------------------------------------------------------
+    # Legend
+    # ----------------------------------------------------------------------
+    legend_handles = [
+        Rectangle((0, 0), 1, 1, facecolor="red", edgecolor="gray", label="Matrix1 Only"),
+        Rectangle((0, 0), 1, 1, facecolor="blue", edgecolor="gray", label="Matrix2 Only"),
+        Rectangle((0, 0), 1, 1, facecolor="purple", edgecolor="gray", label="Overlap"),
     ]
-    ax.legend(handles=handles, loc='upper right')
+    ax.legend(handles=legend_handles, loc="upper right")
 
-    # Labels and title
-    ax.set_title("Targets Comparison (Dynamic Grid Zoomed)", fontsize=14)
-    ax.set_xlabel("Range Index (scaled)")
-    ax.set_ylabel("Doppler Index (scaled)")
+    # ----------------------------------------------------------------------
+    # Titles
+    # ----------------------------------------------------------------------
+    ax.set_title("Range–Doppler Target Comparison (Zoomed with Original Axis Labels)")
+    ax.set_xlabel("Range Index")
+    ax.set_ylabel("Doppler Index")
 
     plt.tight_layout()
     plt.show()

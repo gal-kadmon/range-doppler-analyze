@@ -1,55 +1,107 @@
 # main.py
 # -----------------------------------------------------------------------------
-# Entry point: generate synthetic Range-Doppler data, compare matrices, visualize results
+# Demo for system integration using TxtReader + synthetic PDU generation.
+# Works entirely with dictionary-based PDUs (as required by the DataReader interface).
 # -----------------------------------------------------------------------------
 
-from generate_data import generate_synthetic_rd_data
-from compare_matrices import compare_target_matrices
+import os
+import pandas as pd
+
+from txt_reader import TxtReader
 from visualize_comparison import plot_targets
 
 
 def main():
-    # --------------------------
-    # Generate synthetic data
-    # --------------------------
-    print("Generating synthetic Range-Doppler data...")
-    pdu = generate_synthetic_rd_data(
-        matrix_shape=(32, 1024),
-        num_unique_m1=6,
-        num_unique_m2=6,
-        num_shared=4,
-        seed=42
-    )
-    print("✅ Synthetic data generated. Log written to 'synthetic_generation_log.txt'.\n")
 
-    # --------------------------
-    # Compare matrices
-    # --------------------------
-    print("Comparing matrices...")
-    pdu = compare_target_matrices(pdu, connectivity=1)
-    print("✅ Comparison complete.\n")
+    # ---------------------------------------------------------
+    # Step 1: Create or load TXT file with PDU names
+    # ---------------------------------------------------------
+    txt_path = "pdu_list.txt"
 
-    # --------------------------
-    # Display results
-    # --------------------------
-    for table in pdu.tables:
-        print(f"\n=== Table: {table.name} ===")
-        if table.data.empty:
-            print("(empty)")
-        else:
-            print(table.data.to_string(index=False))
+    if not os.path.exists(txt_path):
+        with open(txt_path, "w") as f:
+            for i in range(1, 31):
+                f.write(f"PDU_{i:03d}\n")
+        print(f"Created example {txt_path}")
 
-    # --------------------------
-    # Visualize comparison results
-    # --------------------------
-    matrix1_only = next(t.data for t in pdu.tables if t.name == 'matrix1_only')
-    matrix2_only = next(t.data for t in pdu.tables if t.name == 'matrix2_only')
-    overlap = next(t.data for t in pdu.tables if t.name == 'overlap')
-    shape = pdu.tensors[0].data.shape
+    reader = TxtReader()
 
-    print("\nDisplaying comparison visualization...")
-    plot_targets(matrix1_only, matrix2_only, overlap, shape)
-    print("✅ Visualization complete.")
+    # ---------------------------------------------------------
+    # Step 2: Read list of PDU names
+    # ---------------------------------------------------------
+    print("\nReading PDU list from file...")
+    names = reader.get_process_unit_names(txt_path, "file")
+
+    if not names:
+        print("No PDUs found in TXT file.")
+        return
+
+    print(f"Found {len(names)} available PDUs:")
+    for name in names:
+        print(f"    {name}")
+
+    # ---------------------------------------------------------
+    # Step 3: Simulate user selection
+    # ---------------------------------------------------------
+    selected_pdu = names[28]      
+    print(f"\nSimulated user selection → {selected_pdu}")
+
+    # ---------------------------------------------------------
+    # Step 4: Load PDU using the reader (returns dict!)
+    # ---------------------------------------------------------
+    print(f"Loading PDU '{selected_pdu}' (synthetic via seed)...\n")
+
+    pdu = reader.get_process_unit_by_name(txt_path, "file", selected_pdu)
+
+    print("PDU successfully generated and processed.\n")
+
+    # ---------------------------------------------------------
+    # Step 5: Print tables (dictionary format)
+    # ---------------------------------------------------------
+    print("=== Available Tables in PDU ===")
+
+    tables = pdu.get("tables", [])
+    if not tables:
+        print("(No tables found)")
+    else:
+        for table in tables:
+            print(f"\nTable: {table.get('name', '(unknown)')}")
+            df = pd.DataFrame(table.get("data", []))
+            if df.empty:
+                print("(empty)")
+            else:
+                print(df.to_string(index=False))
+
+    # ---------------------------------------------------------
+    # Step 6: Prepare DataFrames for visualization
+    # ---------------------------------------------------------
+    # Helper to extract table by name
+    def get_table(name: str):
+        return next((t for t in tables if t["name"] == name), None)
+
+    df_m1_only = pd.DataFrame(get_table("matrix1_only")["data"])
+    df_m2_only = pd.DataFrame(get_table("matrix2_only")["data"])
+    df_overlap = pd.DataFrame(get_table("overlap")["data"])
+
+    # ---------------------------------------------------------
+    # Step 7: Extract matrix shape (from dict tensor info)
+    # ---------------------------------------------------------
+    tensors = pdu.get("tensors", [])
+    if not tensors:
+        raise RuntimeError("No tensors found inside PDU.")
+
+    # tensor format:
+    # {"name": ..., "data": [...], "dims": [...], ...}
+    tensor0 = tensors[0]
+    shape = tuple(tensor0["dims"])     # (range, doppler)
+
+    # ---------------------------------------------------------
+    # Step 8: Visualization
+    # ---------------------------------------------------------
+    print("\nRendering visualization...")
+    plot_targets(df_m1_only, df_m2_only, df_overlap, shape)
+
+    print("\nDone. System simulation completed.\n")
 
 
 if __name__ == "__main__":
